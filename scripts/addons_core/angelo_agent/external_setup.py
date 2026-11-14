@@ -32,8 +32,9 @@ import tomllib
 import uuid
 from pathlib import Path
 
-from . import shared_replace
+from . import cli_runtime, shared_replace
 from .external_clients import APP_NAMES, DEFAULT_CLIENT
+from .protocol import RpcError
 
 SERVER = "angelo"
 CODEX_TOOL_TIMEOUT = 900   # external_mcp.CALL_DEADLINE: a call may wait that long for the person.
@@ -121,14 +122,33 @@ def has_entry(app, home=None, environ=None, platform=None):
 
 # Writing --------------------------------------------------------------------------------------------
 
+def find_cli(name):
+    """The CLI's path as Angelo's providers find it (``cli_runtime.find_executable``), or None.
+
+    A Finder-launched macOS app inherits only ``/usr/bin:/bin:/usr/sbin:/sbin``, so ``shutil.which`` alone misses
+    ``~/.local/bin`` (Claude Code's native installer), Homebrew and npm-global installs. May probe a login shell
+    once per process (bounded); call it off the main thread.
+    """
+    try:
+        return cli_runtime.find_executable(name)
+    except RpcError:
+        return None
+
+
+def _cli_environ(environ, executable):
+    """The environment to run a found CLI in: the person's PATH plus where an npm-installed CLI's ``node`` lives."""
+    return cli_runtime.with_runtime_path(dict(environ if environ is not None else os.environ), executable)
+
+
 def connect(app, python, state_directory, *, name=None, home=None, environ=None, platform=None, run=subprocess.run,
-            which=shutil.which):
+            which=find_cli):
     """Add (or replace) the ``angelo`` entry in the app's settings; returns a short English result line."""
     command, args = server_command(app, python, state_directory, name)
     if app == "claude_code":
         claude = which("claude")
         if not claude:
             raise SetupError("Claude Code's command (claude) was not found")
+        environ = _cli_environ(environ, claude)
         _run(run, [claude, "mcp", "remove", "--scope", "user", SERVER], check=False, environ=environ)
         _run(run, [claude, "mcp", "add", "--scope", "user", SERVER, "--", command, *args], environ=environ)
         return "Added Angelo to Claude Code (user scope). Start a new Claude Code session to use it."
@@ -148,12 +168,13 @@ def connect(app, python, state_directory, *, name=None, home=None, environ=None,
     return "Added Angelo to %s. Restart %s to load it." % (APP_NAMES[app], APP_NAMES[app])
 
 
-def disconnect(app, *, home=None, environ=None, platform=None, run=subprocess.run, which=shutil.which):
+def disconnect(app, *, home=None, environ=None, platform=None, run=subprocess.run, which=find_cli):
     """Remove only the ``angelo`` entry; True when one was removed."""
     if app == "claude_code":
         claude = which("claude")
         if not claude:
             return False
+        environ = _cli_environ(environ, claude)
         return _run(run, [claude, "mcp", "remove", "--scope", "user", SERVER], check=False, environ=environ) == 0
     path = settings_file(app, home, environ, platform)
     if path is None or not path.exists():

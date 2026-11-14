@@ -146,6 +146,37 @@ class SetupTests(unittest.TestCase):
         with self.assertRaises(SetupError):
             self.connect("claude_code", run=run, which=lambda name: None)
 
+    def test_claude_code_is_found_the_way_angelos_providers_find_it(self):
+        # A Finder launch's PATH misses ~/.local/bin, so plain shutil.which never found the native installer's claude.
+        self.assertIs(external_setup.connect.__kwdefaults__["which"], external_setup.find_cli)
+        self.assertIs(external_setup.disconnect.__kwdefaults__["which"], external_setup.find_cli)
+        original = external_setup.cli_runtime.find_executable
+        self.addCleanup(setattr, external_setup.cli_runtime, "find_executable", original)
+        external_setup.cli_runtime.find_executable = lambda name: "/Users/p/.local/bin/" + name
+        self.assertEqual(external_setup.find_cli("claude"), "/Users/p/.local/bin/claude")
+
+        def missing(name):
+            raise external_setup.RpcError("not found")
+        external_setup.cli_runtime.find_executable = missing
+        self.assertIsNone(external_setup.find_cli("claude"))
+
+    def test_claude_code_runs_with_its_own_directory_on_path(self):
+        # An npm-installed claude is a node script; under a Finder launch's PATH its interpreter is not found.
+        envs = []
+
+        def run(argv, **kwargs):
+            envs.append(kwargs.get("env") or {})
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        self.environ = {"PATH": "/usr/bin:/bin"}
+        self.connect("claude_code", run=run, which=lambda name: "/opt/tools/node/bin/claude")
+        self.disconnect("claude_code", run=run, which=lambda name: "/opt/tools/node/bin/claude")
+        self.assertEqual(len(envs), 3)
+        for env in envs:
+            path = env["PATH"].split(":")
+            self.assertEqual(path[:2], ["/usr/bin", "/bin"])   # The person's PATH stays first.
+            self.assertIn("/opt/tools/node/bin", path)
+        self.assertEqual(self.environ, {"PATH": "/usr/bin:/bin"})   # The caller's mapping is never changed.
+
     def test_a_linked_settings_file_stays_a_link(self):
         repo = self.home / "dotfiles"
         repo.mkdir()
