@@ -338,4 +338,85 @@ class ListingReadinessTests(unittest.TestCase):
         self.assertEqual(progress['open'],1);self.assertEqual(progress['activate'],0)
 
 
+
+class EngineOnlyListingTests(unittest.TestCase):
+    """A listing whose only format is an engine package (Unreal Engine) shows Fab's library control and no Download
+    (live 2026-11-14: 'RPG Hero Squad PBR Polyart', 'Adventure Character'). It is refused as not addable at once."""
+    def observe(self, openings):
+        connection,account,calls=ListingFailureTests.connection(self,snapshot=observed())
+        call=connection._browser.call;seen={'open':0,'decode':0}
+        def sequenced(method,params,**kwargs):
+            expression=params.get('expression','') if method=='Runtime.evaluate' else ''
+            if 'download_dialog_opening' in expression:
+                state=openings[min(seen['open'],len(openings)-1)];seen['open']+=1
+                return {'result':{'value':{'state':state,'ready':'complete'}}}
+            if method=='Runtime.evaluate' and 'document_ready' not in expression:seen['decode']+=1
+            return call(method,params,**kwargs)
+        connection._browser=SimpleNamespace(call=sequenced)
+        clock=SimpleNamespace(now=0.0)
+        def sleep(seconds):clock.now+=max(seconds,.1)
+        never=SimpleNamespace(is_set=lambda:clock.now>=25)
+        with patch.object(owner,'_ProbeStop',return_value=never),patch.object(owner.time,'monotonic',lambda:clock.now),\
+                patch.object(owner.time,'sleep',sleep):
+            try:return BrowserTransport(connection,account)._listing(ID,Stop()),seen,clock
+            except FabError as error:return error,seen,clock
+
+    def test_no_download_is_unsupported_after_settling_not_the_whole_bound(self):
+        error,seen,clock=self.observe(['download_not_offered'])
+        self.assertIsInstance(error,FabError)
+        self.assertEqual(error.code,'UNSUPPORTED')
+        self.assertEqual(error.producer_diagnostic['reason'],'LISTING_NO_DOWNLOAD')
+        self.assertEqual(error.producer_diagnostic['listing']['open_result'],'download_not_offered')
+        self.assertGreaterEqual(clock.now,owner.NO_DOWNLOAD_SETTLE)
+        self.assertLess(clock.now,owner.NO_DOWNLOAD_SETTLE+1)   # Not the 25 s bound the search used to wait out.
+        self.assertEqual(seen['decode'],0)                      # No Download was pressed, so nothing to decode.
+
+    def test_a_download_that_appears_while_settling_is_used(self):
+        result,seen,_clock=self.observe(['download_not_offered','download_not_offered','download_dialog_opening'])
+        self.assertNotIsInstance(result,FabError)
+        self.assertEqual(result[0].identity,ID)
+
+    def test_the_page_script_names_the_state_only_without_download_or_price(self):
+        script=owner._OPEN_DOWNLOAD
+        self.assertIn("'Add to My Library'",script);self.assertIn("'Saved in My Library'",script)
+        self.assertLess(script.index("result('purchase_required')"),script.index("result('download_not_offered')"))
+        self.assertIn("buttons.length===0&&buy===0&&library>0",script)
+
+
+class SearchSkipsUnreadableListingsTests(unittest.TestCase):
+    """One listing Angelo cannot read no longer fails the whole search ("Fab is unavailable")."""
+    OTHER='87654321-4321-4321-4321-cba987654321'
+
+    def transport(self, failures):
+        rows=[{'id':'fab:'+ID,'title':'Readable'},{'id':'fab:'+self.OTHER,'title':'Unreadable'}]
+        transport=BrowserTransport.__new__(BrowserTransport)
+        transport._owner=SimpleNamespace(public_search=lambda q,n,stop:{'items':rows})
+        transport._check=lambda stop:None
+        transport._metadata=lambda item:{'id':item.identity}
+        def listing(identity,stop):
+            if identity in failures:raise FabError(failures[identity])
+            return None,SimpleNamespace(identity=identity,needs_purchase_suggestion=lambda:False)
+        transport._listing=listing
+        return transport
+
+    def search(self, failures):
+        with patch('angelo_agent.fab_browser_background.place'):
+            return self.transport(failures).search('hero',8,False,Stop())
+
+    def test_an_unreadable_listing_is_skipped_and_the_rest_answers(self):
+        self.assertEqual(self.search({self.OTHER:'UNAVAILABLE'}),[{'id':ID}])
+
+    def test_every_listing_unreadable_is_still_unavailable(self):
+        with self.assertRaises(FabError) as caught:self.search({ID:'UNAVAILABLE',self.OTHER:'UNAVAILABLE'})
+        self.assertEqual(caught.exception.code,'UNAVAILABLE')
+
+    def test_engine_only_listings_are_skipped_without_failing(self):
+        self.assertEqual(self.search({ID:'UNSUPPORTED',self.OTHER:'UNSUPPORTED'}),[])
+
+    def test_sign_in_cancel_and_expiry_still_stop_the_search(self):
+        for code in ('AUTH_REQUIRED','CANCELLED','EXPIRED'):
+            with self.subTest(code=code),self.assertRaises(FabError) as caught:self.search({self.OTHER:code})
+            self.assertEqual(caught.exception.code,code)
+
+
 if __name__=='__main__':unittest.main()

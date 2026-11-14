@@ -15,6 +15,7 @@ REASONS = frozenset({'AUTH_REQUIRED', 'CLOSED', 'USER_SIGN_IN_PENDING', 'ACCOUNT
                     'LISTING_PROOF_UNAVAILABLE', 'LISTING_ID_INVALID', 'NAVIGATION_FAILED', 'BUSY',
                     'OBSERVATION_SHAPE', 'OBSERVATION_LIMIT', 'SITE_CHANGED', 'LISTING_CHANGED',
                     'CHOICE_AMBIGUOUS', 'LISTING_OUTSIDE', 'LISTING_NOT_READY', 'LISTING_DOWNLOAD_CONTROL',
+                    'LISTING_NO_DOWNLOAD',
                     'LISTING_SCAN_LIMIT', 'LISTING_LABEL_RELATION', 'LISTING_MODAL_HEADING',
                     'LISTING_TITLE_COUNT', 'LISTING_TITLE_SCOPE', 'LISTING_SELLER_COUNT',
                     'LISTING_MODAL_TITLE', 'LISTING_NO_GLB', 'LISTING_CONVERTED_GROUP', 'LISTING_CONVERTED_REGION',
@@ -39,7 +40,7 @@ FUNCTIONS = frozenset({'read_current_account', '_read_current_account', '_value'
 def _listing_details(value):
     """Bounded fixed enums/counts only; frame/loader IDs and observed content have no output field."""
     states={'not_observed','outside_listing','not_ready','dialog_present','download_dialog_opening',
-            'download_control_unavailable','scan_limit','document_loading','document_ready'}
+            'download_control_unavailable','download_not_offered','scan_limit','document_loading','document_ready'}
     branches=states|{'body_missing','dialog_missing','rows_missing','glb_missing','license_missing'}
     if (type(value)is not dict or set(value)not in ({'open_result','navigation_probes','trace'},
                                             {'open_result','navigation_probes','target_activated','trace'})

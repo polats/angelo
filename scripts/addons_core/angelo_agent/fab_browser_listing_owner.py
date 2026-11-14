@@ -8,6 +8,9 @@ from .fab_browser_identity import _ProbeStop,_value
 from .fab_browser_listing_page import OBSERVE_LISTING_JS,parse_listing_observation,ListingObservationUnavailable
 
 _UUID=re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
+# How long a complete page must keep showing Fab's library control without a Download before the listing is taken as
+# offering no file. Both controls render together on a loaded page (live 2026-11-14); this only rides out hydration.
+NO_DOWNLOAD_SETTLE=1.5
 _DOWNLOAD_READINESS=r"""(() => {
  const ready=['loading','interactive','complete'].includes(document.readyState)?document.readyState:'other';
  const visibility=['visible','hidden','prerender'].includes(document.visibilityState)?document.visibilityState:'other';
@@ -23,10 +26,12 @@ _OPEN_DOWNLOAD=r"""(() => {
  const visible=n=>{if(!n.getClientRects().length)return false;let d=0;
   for(let p=n;p;p=p.parentElement){if(++d>64)return false;const s=getComputedStyle(p);
    if(s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}return true;};
- const walk=document.createTreeWalker(document.body,NodeFilter.SHOW_ELEMENT);let n,k=0,buttons=[],dialogs=0,buy=0;
+ const walk=document.createTreeWalker(document.body,NodeFilter.SHOW_ELEMENT);let n,k=0,buttons=[],dialogs=0,buy=0,library=0;
  while((n=walk.nextNode())){
   if(++k>4000)return result('scan_limit');
   if(n.tagName==='BUTTON'&&visible(n)&&/^(Add to cart|Buy now)$/.test(n.textContent.trim()))buy++;
+  if(visible(n)&&((n.tagName==='BUTTON'&&n.textContent.trim()==='Add to My Library')
+   ||(/^H[1-6]$/.test(n.tagName)&&n.textContent.trim()==='Saved in My Library')))library++;
   if(n.tagName==='DIV'&&n.getAttribute('role')==='dialog'&&n.getAttribute('aria-modal')==='true'&&visible(n))dialogs++;
   if(n.tagName==='BUTTON'&&n.getAttribute('type')==='button'&&!n.getAttribute('aria-label')&&visible(n)
    &&n.textContent.length<=240&&n.textContent.trim()==='Download'&&!n.disabled
@@ -34,6 +39,9 @@ _OPEN_DOWNLOAD=r"""(() => {
  }
  if(dialogs===1)return result('dialog_present');
  if(dialogs===0&&buttons.length===0&&buy>0)return result('purchase_required');   // A paid listing: no Download yet.
+ // Fab's library control has rendered but no Download: an engine-only listing (Unreal Engine asset package, a Unity
+ // package through its launcher). Fab offers no file to download, whether or not it is in the person's library.
+ if(dialogs===0&&buttons.length===0&&buy===0&&library>0)return result('download_not_offered');
  if(dialogs!==0||buttons.length!==1)return result('download_control_unavailable');
  buttons[0].click();return result('download_dialog_opening');
 })()"""
@@ -88,7 +96,7 @@ def _observe_listing(connection,item_id,stop,phase,diagnostic):
   inspect_document();trace('after_navigation','not_observed')
   last_decode=None
   # Opening is idempotent: once any modal appears, no repeated click or acquisition action occurs.
-  opened=False;last_reason='LISTING_NOT_READY';last_decoder=None
+  opened=False;last_reason='LISTING_NOT_READY';last_decoder=None;no_download_since=None
   waited_for_license=False
   while not bounded.is_set():
    if browser is not connection._browser:raise BrowserUnavailable('LISTING_PROOF_UNAVAILABLE')
@@ -128,16 +136,23 @@ def _observe_listing(connection,item_id,stop,phase,diagnostic):
     value=_value(browser,connection._session,_OPEN_DOWNLOAD.replace('EXPECTED_PATH',json.dumps(path)),bounded,deadline)
     state=value.get('state')
     if state in ('outside_listing','document_loading'):document_state='UNOBSERVED'
-    if state in ('outside_listing','not_ready','dialog_present','download_dialog_opening','download_control_unavailable','scan_limit','document_loading'):
+    if state in ('outside_listing','not_ready','dialog_present','download_dialog_opening','download_control_unavailable','download_not_offered','scan_limit','document_loading'):
      diagnostic['open_result']=state
      ready=value.get('ready','UNOBSERVED')
      trace('open',state,ready if ready in ('loading','interactive','complete','other') else 'UNOBSERVED')
     last_reason={'outside_listing':'LISTING_OUTSIDE','not_ready':'LISTING_NOT_READY',
-                 'download_control_unavailable':'LISTING_DOWNLOAD_CONTROL','scan_limit':'LISTING_SCAN_LIMIT',
+                 'download_control_unavailable':'LISTING_DOWNLOAD_CONTROL','download_not_offered':'LISTING_NO_DOWNLOAD',
+                 'scan_limit':'LISTING_SCAN_LIMIT',
                  'document_loading':'LISTING_DOCUMENT_LOADING'}.get(state,'LISTING_PROOF_UNAVAILABLE') if type(state)is str else 'LISTING_PROOF_UNAVAILABLE'
     if value.get('state')=='purchase_required':raise BrowserUnavailable('PURCHASE_REQUIRED')
+    if state=='download_not_offered':
+     now=time.monotonic();no_download_since=now if no_download_since is None else no_download_since
+     if now-no_download_since>=NO_DOWNLOAD_SETTLE:
+      refused=BrowserUnavailable('LISTING_NO_DOWNLOAD');refused.listing_reason='LISTING_NO_DOWNLOAD'
+      raise refused
+    else:no_download_since=None
     if value.get('state')in('dialog_present','download_dialog_opening'):opened=True
-    elif value.get('state')not in('outside_listing','not_ready','download_control_unavailable','document_loading'):
+    elif value.get('state')not in('outside_listing','not_ready','download_control_unavailable','download_not_offered','document_loading'):
      refused=BrowserUnavailable('LISTING_PROOF_UNAVAILABLE');refused.listing_reason=last_reason
      raise refused
    if opened:

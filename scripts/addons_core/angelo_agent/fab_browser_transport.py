@@ -22,13 +22,18 @@ from .fab_catalog import FabError, Item, MAX_RESULTS, Variant
 from .team_library_files import MAX_BYTES
 from .fab_browser_failure import mapped_failure_details
 
+# A search stops on these; any other failure of one listing skips that listing (``BrowserTransport.search``).
+SEARCH_STOPS = frozenset(('AUTH_REQUIRED', 'CANCELLED', 'EXPIRED'))
+
 
 def _browser_error(error, *, phase='transport_observe'):
     """Only reviewed owner failure codes cross into the public Fab vocabulary; never exception text."""
     failure = FabError({'AUTH_REQUIRED': 'AUTH_REQUIRED', 'ACCOUNT_PROOF_PENDING': 'AUTH_REQUIRED', 'CLOSED': 'AUTH_REQUIRED',
                      'CANCELLED': 'CANCELLED', 'LISTING_PROOF_PENDING': 'UNSUPPORTED',
                      'DOWNLOAD_PROOF_PENDING': 'UNAVAILABLE', 'DOWNLOAD_ITEM_CHANGED': 'EXPIRED',
-                     'PURCHASE_REQUIRED': 'PURCHASE_REQUIRED'}.get(
+                     'PURCHASE_REQUIRED': 'PURCHASE_REQUIRED',
+                     # An engine-only listing (an Unreal Engine asset package): Fab offers no file to download.
+                     'LISTING_NO_DOWNLOAD': 'UNSUPPORTED'}.get(
                          error.code, 'UNAVAILABLE'))
     failure.producer_diagnostic = mapped_failure_details(error, phase=phase)
     return failure
@@ -140,6 +145,7 @@ class BrowserTransport:
             if type(rows) is not list or len(rows) > limit:
                 raise FabError('INVALID_METADATA')
             found, seen, thumbs = [], set(), {}
+            unreadable, unread = None, 0
             for row in rows:
                 stop.check()
                 if type(row) is not dict or type(row.get('id')) is not str or not row['id'].startswith('fab:'):
@@ -167,10 +173,20 @@ class BrowserTransport:
                             found.append(dict(id=identity, title=row.get('title'), price=row.get('price'),
                                               purchase_required=True))
                         continue
-                    raise
+                    if error.code in SEARCH_STOPS:
+                        raise
+                    # One listing Angelo could not read (a page that never settled, a layout it does not know) is
+                    # skipped like an unsupported one, so the rest of the search still answers; its cause goes to
+                    # the console. Only when every listing failed this way is the search itself unavailable.
+                    from .fab_failure_report import reported
+                    reported(error, error.code, 'listing skipped in search')
+                    unreadable, unread = unreadable or error, unread + 1
+                    continue
                 if include_paid or not item.needs_purchase_suggestion():
                     found.append(dict(self._metadata(item), thumb=thumbs.get(identity)) if thumbs.get(identity)
                                  else self._metadata(item))
+            if unreadable is not None and unread == len(rows):
+                raise unreadable
             from .fab_browser_background import place
             place(self._owner, False)
             return found

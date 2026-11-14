@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Angelo Contributors
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Fab branches of the existing two Library tools and their shared human Session."""
-from . import fab_approval, fab_host, fab_native_job
+from . import fab_approval, fab_failure_report, fab_host, fab_native_job
 from .fab_catalog import FabError
 from .ui_text import n_
 
@@ -54,8 +54,11 @@ def search(service, args):
             state['result'] = dict(result, source='fab', query=args['query'],
                                    total=len(rows), next_offset=None)
         except FabError as error:
+            # The chat gets the closed message; the console gets where it came from (fab_failure_report).
+            fab_failure_report.reported(error, error.code, 'search failed')
             state['result'] = _failure(str(error), 'EXPIRED' if error.code == 'EXPIRED' else 'UNSUPPORTED')
-        except Exception:
+        except Exception as error:
+            fab_failure_report.reported(error, None, fab_failure_report.UNEXPECTED)
             state['result'] = _failure('Fab search could not complete.', 'UNSUPPORTED')
         return state['result']
     return LibraryPending(poll, cancel=job.stop, cleanup=job.stop, timeout=120,
